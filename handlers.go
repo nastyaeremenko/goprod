@@ -14,25 +14,53 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Реализуйте регистрацию пользователя
-	//
-	// Пошаговый план:
-	// 1. Распарсите JSON из тела запроса в структуру RegisterRequest
-	// 2. Проведите валидацию данных (email, username, password)
-	// 3. Проверьте, что пользователь с таким email не существует
-	// 4. Захешируйте пароль с помощью функции HashPassword()
-	// 5. Создайте пользователя в БД с помощью CreateUser()
-	// 6. Сгенерируйте JWT токен с помощью GenerateToken()
-	// 7. Верните ответ с токеном и данными пользователя
-	//
-	// Подсказки:
-	// - Используйте json.NewDecoder(r.Body).Decode() для парсинга JSON
-	// - Проверьте что все обязательные поля заполнены
-	// - При ошибках возвращайте соответствующие HTTP статусы
-	// - 400 для невалидных данных, 409 для дубликатов, 500 для внутренних ошибок
-	// - Не забудьте установить Content-Type: application/json для ответа
+	// 1. Парсим тело запроса
+	var req RegisterRequest
+	if err := parseJSONRequest(r, &req); err != nil {
+		sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
 
-	http.Error(w, "Registration not implemented", http.StatusNotImplemented)
+	// 2. Валидация входных данных
+	if err := validateRegisterRequest(&req); err != nil {
+		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 3. Проверяем, что email ещё не занят
+	exists, err := UserExistsByEmail(req.Email)
+	if err != nil {
+		sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if exists {
+		sendErrorResponse(w, "User with this email already exists", http.StatusConflict)
+		return
+	}
+
+	// 4. Хешируем пароль (в БД пойдёт только хеш, не открытый пароль)
+	passwordHash, err := HashPassword(req.Password)
+	if err != nil {
+		sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// 5. Создаём пользователя
+	user, err := CreateUser(req.Email, req.Username, passwordHash)
+	if err != nil {
+		sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// 6. Выдаём JWT токен сразу после регистрации
+	token, err := GenerateToken(*user)
+	if err != nil {
+		sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// 7. Отдаём токен и данные пользователя (password_hash скрыт тегом json:"-")
+	sendJSONResponse(w, AuthResponse{Token: token, User: *user}, http.StatusCreated)
 }
 
 // LoginHandler обрабатывает вход пользователя
@@ -42,23 +70,43 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Реализуйте авторизацию пользователя
-	//
-	// Пошаговый план:
-	// 1. Распарсите JSON из тела запроса в структуру LoginRequest
-	// 2. Проведите базовую валидацию (email и password не пустые)
-	// 3. Найдите пользователя по email с помощью GetUserByEmail()
-	// 4. Проверьте пароль с помощью CheckPassword()
-	// 5. Сгенерируйте JWT токен с помощью GenerateToken()
-	// 6. Верните ответ с токеном и данными пользователя
-	//
-	// Важные моменты безопасности:
-	// - При неверном email или пароле возвращайте одинаковое сообщение
-	//   "Invalid email or password" чтобы не раскрывать существование email
-	// - Используйте HTTP статус 401 для неверных учетных данных
-	// - Не возвращайте password_hash в ответе
+	// 1. Парсим тело запроса
+	var req LoginRequest
+	if err := parseJSONRequest(r, &req); err != nil {
+		sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
 
-	http.Error(w, "Login not implemented", http.StatusNotImplemented)
+	// 2. Базовая валидация
+	if err := validateLoginRequest(&req); err != nil {
+		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 3. Ищем пользователя по email
+	user, err := GetUserByEmail(req.Email)
+	if err != nil {
+		// И "нет такого email", и "неверный пароль" -> одинаковый ответ,
+		// чтобы не раскрывать, какие email зарегистрированы
+		sendErrorResponse(w, "Invalid email or password", http.StatusUnauthorized)
+		return
+	}
+
+	// 4. Сверяем пароль с хешем
+	if !CheckPassword(req.Password, user.PasswordHash) {
+		sendErrorResponse(w, "Invalid email or password", http.StatusUnauthorized)
+		return
+	}
+
+	// 5. Выдаём новый токен
+	token, err := GenerateToken(*user)
+	if err != nil {
+		sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// 6. Отдаём токен и данные пользователя
+	sendJSONResponse(w, AuthResponse{Token: token, User: *user}, http.StatusOK)
 }
 
 // ProfileHandler возвращает профиль текущего пользователя
@@ -68,20 +116,22 @@ func ProfileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Реализуйте получение профиля пользователя
-	//
-	// Пошаговый план:
-	// 1. Получите ID пользователя из контекста с помощью GetUserIDFromContext()
-	// 2. Загрузите данные пользователя из БД с помощью GetUserByID()
-	// 3. Верните данные пользователя в JSON формате
-	//
-	// Примечания:
-	// - Этот обработчик вызывается только после AuthMiddleware
-	// - Контекст уже должен содержать userID
-	// - Если пользователь не найден - верните 404
-	// - Не включайте password_hash в ответ
+	// 1. Достаём userID из контекста (его положил туда AuthMiddleware)
+	userID, ok := GetUserIDFromContext(r)
+	if !ok {
+		sendErrorResponse(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-	http.Error(w, "Profile not implemented", http.StatusNotImplemented)
+	// 2. Загружаем пользователя из БД
+	user, err := GetUserByID(userID)
+	if err != nil {
+		sendErrorResponse(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	// 3. Возвращаем профиль (password_hash скрыт тегом json:"-")
+	sendJSONResponse(w, user, http.StatusOK)
 }
 
 // HealthHandler проверяет состояние сервиса
@@ -146,10 +196,15 @@ func validateRegisterRequest(req *RegisterRequest) error {
 		return fmt.Errorf("password is required")
 	}
 
-	// TODO: Добавьте дополнительные проверки
-	// - Используйте ValidateEmail() и ValidatePassword() из auth.go
-	// - Проверьте длину username (например, минимум 3 символа)
-	// - Проверьте что username содержит только допустимые символы
+	if err := ValidateEmail(req.Email); err != nil {
+		return err
+	}
+	if len(req.Username) < 3 {
+		return fmt.Errorf("username must be at least 3 characters long")
+	}
+	if err := ValidatePassword(req.Password); err != nil {
+		return err
+	}
 
 	return nil
 }
